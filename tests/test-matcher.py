@@ -1,44 +1,11 @@
 import unittest
 
-from explainshell import matcher, store, errors, options, helpconstants
+import bashlex.errors, bashlex.ast
 
-class mockstore(object):
-    def __init__(self):
-        sp = store.paragraph
-        so = store.option
-        sm = store.manpage
+from explainshell import matcher, errors, helpconstants
+from tests import helpers
 
-        p0 = sp(0, '-a desc', '', True)
-        p1 = sp(1, '-b <arg> desc', '', True)
-        p2 = sp(2, '-? help text', '', True)
-        p3 = sp(3, '-c=one,two\ndesc', '', True)
-        p4 = sp(4, 'FILE argument', '', True)
-        opts = [so(p0, ['-a'], ['--a'], False),
-                so(p1, ['-b'], ['--b'], '<arg>'),
-                so(p2, ['-?'], [], False),
-                so(p3, ['-c'], [], ['one', 'two'])]
-        self.manpages = {
-                'bar' : sm('bar.1.gz', 'bar', 'bar synopsis', opts, [], multicommand=True),
-                'baz' : sm('baz.1.gz', 'baz', 'baz synopsis', opts, [], True),
-                'bar foo' : sm('bar-foo.1.gz', 'bar-foo', 'bar foo synopsis', opts, [], True)}
-
-        self.dup = [sm('dup.1.gz', 'dup', 'dup1 synopsis', opts, []),
-                    sm('dup.2.gz', 'dup', 'dup2 synopsis', opts, [])]
-
-        opts = list(opts)
-        opts.append(so(p4, [], [], False, 'FILE'))
-        self.manpages['withargs'] = sm('withargs.1.gz', 'withargs', 'withargs synopsis',
-                                       opts, [], False)
-
-    def findmanpage(self, x, section=None):
-        try:
-            if x == 'dup':
-                return self.dup
-            return [self.manpages[x]]
-        except KeyError:
-            raise errors.ProgramDoesNotExist(x)
-
-s = mockstore()
+s = helpers.mockstore()
 
 class test_matcher(unittest.TestCase):
     def assertMatchSingle(self, what, expectedmanpage, expectedresults):
@@ -86,6 +53,14 @@ class test_matcher(unittest.TestCase):
             (6, 9, '-b <arg> desc', 'b12')]
 
         self.assertMatchSingle(cmd, s.findmanpage('baz')[0], matchedresult)
+
+    def test_partialmatch_with_arguments(self):
+        cmd = 'withargs arg'
+        matchedresult = [
+            (0, 8, 'withargs synopsis', 'withargs'),
+            (9, 12, 'FILE argument', 'arg')]
+
+        self.assertMatchSingle(cmd, s.findmanpage('withargs')[0], matchedresult)
 
     def test_reset_current_option_if_argument_taken(self):
         cmd = 'withargs -ab12 arg'
@@ -189,10 +164,11 @@ class test_matcher(unittest.TestCase):
         self.assertMatchSingle('bar -ax', s.findmanpage('bar')[0], matchedresult)
 
     def test_long(self):
-        cmd = 'bar --b=b'
+        cmd = 'bar --b=b foo'
         matchedresult = [
             (0, 3, 'bar synopsis', 'bar'),
-            (4, 9, '-b <arg> desc', '--b=b')]
+            (4, 9, '-b <arg> desc', '--b=b'),
+            (10, 13, None, 'foo')]
 
         self.assertMatchSingle(cmd, s.findmanpage('bar')[0], matchedresult)
 
@@ -254,25 +230,122 @@ class test_matcher(unittest.TestCase):
 
         self.assertMatchSingle(cmd, s.findmanpage('bar')[0], matchedresult)
 
-    def test_unparsed(self):
-        cmd = '(bar; bar) c'
-        matchedresult = [[(0, 1, helpconstants.SUBSHELL, '('),
-                          (4, 5, helpconstants.OPERATORS[';'], ';'),
-                          (9, 10, helpconstants.SUBSHELL, ')'),
-                          (11, 12, None, 'c')],
-                         [(1, 4, 'bar synopsis', 'bar')],
-                         [(6, 9, 'bar synopsis', 'bar')]]
+    def test_nested_command(self):
+        cmd = 'withargs -b arg bar -a unknown'
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 15, '-b <arg> desc', '-b arg')],
+                         [(16, 19, 'bar synopsis', 'bar'),
+                          (20, 22, '-a desc', '-a'),
+                          (23, 30, None, 'unknown')]]
 
         groups = matcher.matcher(cmd, s).match()
-        self.assertEquals(groups[0].results, matchedresult[0])
-        self.assertEquals(groups[1].results, matchedresult[1])
-        self.assertEquals(groups[2].results, matchedresult[2])
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+
+    def test_nested_option(self):
+        cmd = 'withargs -b arg -exec bar -a EOF -b arg'
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 15, '-b <arg> desc', '-b arg'),
+                          (16, 21, '-exec nest', '-exec'),
+                          (29, 32, '-exec nest', 'EOF'),
+                          (33, 39, '-b <arg> desc', '-b arg')],
+                         [(22, 25, 'bar synopsis', 'bar'),
+                          (26, 28, '-a desc', '-a')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+
+        cmd = "withargs -b arg -exec bar -a ';' -a"
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 15, '-b <arg> desc', '-b arg'),
+                          (16, 21, '-exec nest', '-exec'),
+                          (29, 32, '-exec nest', "';'"),
+                          (33, 35, '-a desc', '-a')],
+                         [(22, 25, 'bar synopsis', 'bar'),
+                          (26, 28, '-a desc', '-a')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+
+        cmd = "withargs -b arg -exec bar -a \\; -a"
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 15, '-b <arg> desc', '-b arg'),
+                          (16, 21, '-exec nest', '-exec'),
+                          (29, 31, '-exec nest', "\\;"),
+                          (32, 34, '-a desc', '-a')],
+                         [(22, 25, 'bar synopsis', 'bar'),
+                          (26, 28, '-a desc', '-a')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+
+        cmd = 'withargs -exec bar -a -u'
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 14, '-exec nest', '-exec')],
+                         [(15, 18, 'bar synopsis', 'bar'),
+                          (19, 21, '-a desc', '-a'),
+                          (22, 24, None, '-u')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+
+    def test_multiple_nests(self):
+        cmd = 'withargs withargs -b arg bar'
+
+        matchedresult = [[(0, 8, 'withargs synopsis', 'withargs')],
+                         [(9, 17, 'withargs synopsis', 'withargs'),
+                          (18, 24, '-b <arg> desc', '-b arg')],
+                         [(25, 28, 'bar synopsis', 'bar')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 4)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult[0])
+        self.assertEquals(groups[2].results, matchedresult[1])
+        self.assertEquals(groups[3].results, matchedresult[2])
+
+    def test_nested_command_is_unknown(self):
+        cmd = 'withargs -b arg unknown'
+
+        matchedresult = [(0, 8, 'withargs synopsis', 'withargs'),
+                          (9, 15, '-b <arg> desc', '-b arg'),
+                          (16, 23, 'FILE argument', 'unknown')]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult)
+
+    def test_unparsed(self):
+        cmd = '(bar; bar) c'
+        self.assertRaises(bashlex.errors.ParsingError,
+                          matcher.matcher(cmd, s).match)
+
 
     def test_known_and_unknown_program(self):
         cmd = 'bar; foo arg >f; baz'
         matchedresult = [[(3, 4, helpconstants.OPERATORS[';'], ';'),
-                          (13, 15,helpconstants.REDIRECTION + '\n\n' +
-                                  helpconstants.REDIRECTION_KIND['>'], '>f'),
+                          (13, 15, helpconstants.REDIRECTION + '\n\n' +
+                                   helpconstants.REDIRECTION_KIND['>'], '>f'),
                           (15, 16, helpconstants.OPERATORS[';'], ';')],
                          [(0, 3, 'bar synopsis', 'bar')],
                          [(5, 12, None, 'foo arg')],
@@ -295,10 +368,10 @@ class test_matcher(unittest.TestCase):
 
     def test_subshells(self):
         cmd = '((bar); bar)'
-        matchedresult = [[(0, 2, helpconstants.SUBSHELL, '(('),
-                          (5, 6, helpconstants.SUBSHELL, ')'),
+        matchedresult = [[(0, 2, helpconstants._subshell, '(('),
+                          (5, 6, helpconstants._subshell, ')'),
                           (6, 7, helpconstants.OPERATORS[';'], ';'),
-                          (11, 12, helpconstants.SUBSHELL, ')')],
+                          (11, 12, helpconstants._subshell, ')')],
                          [(2, 5, 'bar synopsis', 'bar')],
                          [(8, 11, 'bar synopsis', 'bar')]]
 
@@ -325,3 +398,243 @@ class test_matcher(unittest.TestCase):
         self.assertEquals(len(groups), 2)
         self.assertEquals(groups[0].results, matchedresult[0])
         self.assertEquals(groups[1].results, matchedresult[1])
+
+    def test_comsub(self):
+        cmd = 'bar $(a) -b "b $(c) `c`" \'$(d)\' >$(e) `f`'
+
+        matchedresult = [(0, 3, 'bar synopsis', 'bar'),
+                         (4, 8, None, '$(a)'),
+                         (9, 24, '-b <arg> desc', '-b "b $(c) `c`"'),
+                         (25, 31, None, "'$(d)'"),
+                         (38, 41, None, '`f`')]
+        shellresult = [(32, 37, helpconstants.REDIRECTION + '\n\n' +
+                                helpconstants.REDIRECTION_KIND['>'], '>$(e)')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(groups[0].results, shellresult)
+        self.assertEquals(groups[1].results, matchedresult)
+
+        # check expansions
+        self.assertEquals(m.expansions, [(6, 7, 'substitution'),
+                                         (17, 18, 'substitution'),
+                                         (21, 22, 'substitution'),
+                                         (35, 36, 'substitution'),
+                                         (39, 40, 'substitution')])
+
+    def test_comsub_as_arg(self):
+        cmd = 'withargs $(a)'
+
+        matchedresult = [(0, 8, 'withargs synopsis', 'withargs'),
+                         (9, 13, 'FILE argument', '$(a)')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult)
+
+        # check expansions
+        self.assertEquals(m.expansions, [(11, 12, 'substitution')])
+
+    def test_comsub_as_first_word(self):
+        cmd = '$(a) b'
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, [(0, 6, None, '$(a) b')])
+
+        # check expansions
+        self.assertEquals(m.expansions, [(2, 3, 'substitution')])
+
+    def test_procsub(self):
+        cmd = 'withargs -b <(a) >(b)'
+
+        matchedresult = [(0, 8, 'withargs synopsis', 'withargs'),
+                         (9, 16, '-b <arg> desc', '-b <(a)'),
+                         (17, 21, 'FILE argument', '>(b)')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(groups[0].results, [])
+        self.assertEquals(groups[1].results, matchedresult)
+
+        # check expansions
+        self.assertEquals(m.expansions, [(14, 15, 'substitution'),
+                                         (19, 20, 'substitution')])
+
+    def test_if(self):
+        cmd = 'if bar -a; then b; fi'
+        shellresults = [(0, 2, helpconstants._if, 'if'),
+                        (9, 15, helpconstants._if, '; then'),
+                        (17, 21, helpconstants._if, '; fi')]
+
+        matchresults = [[(3, 6, 'bar synopsis', 'bar'), (7, 9, '-a desc', '-a')],
+                        [(16, 17, None, 'b')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults[0])
+        self.assertEquals(groups[2].results, matchresults[1])
+
+    def test_nested_controlflows(self):
+        cmd = 'for a; do while bar; do baz; done; done'
+        shellresults = [(0, 9, helpconstants._for, 'for a; do'),
+                        (10, 15, helpconstants._whileuntil, 'while'),
+                        (19, 23, helpconstants._whileuntil, '; do'),
+                        (27, 33, helpconstants._whileuntil, '; done'),
+                        (33, 39, helpconstants._for, '; done')]
+
+        matchresults = [[(16, 19, 'bar synopsis', 'bar')],
+                        [(24, 27, 'baz synopsis', 'baz')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 3)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults[0])
+        self.assertEquals(groups[2].results, matchresults[1])
+
+    def test_for_expansion(self):
+        cmd = 'for a in $(bar); do baz; done'
+        shellresults = [(0, 19, helpconstants._for, 'for a in $(bar); do'),
+                        (23, 29, helpconstants._for, '; done')]
+
+        matchresults = [(20, 23, 'baz synopsis', 'baz')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+
+        self.assertEquals(m.expansions, [(11, 14, 'substitution')])
+
+
+    def test_assignment_with_expansion(self):
+        cmd = 'a="$1" bar'
+
+        shellresults = [(0, 6, helpconstants.ASSIGNMENT, 'a="$1"')]
+        matchresults = [[(7, 10, 'bar synopsis', 'bar')]]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults[0])
+
+    def test_assignment_as_first_word(self):
+        cmd = 'a=b bar'
+
+        shellresults = [(0, 3, helpconstants.ASSIGNMENT, 'a=b')]
+        matchresults = [(4, 7, 'bar synopsis', 'bar')]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+
+    def test_expansion_limit(self):
+        cmd = 'a $(b $(c))'
+        m = matcher.matcher(cmd, s)
+        m.match()
+
+        class depthchecker(bashlex.ast.nodevisitor):
+            def __init__(self):
+                self.depth = 0
+                self.maxdepth = 0
+            def visitnode(self, node):
+                if 'substitution' in node.kind:
+                    self.depth += 1
+                    self.maxdepth = max(self.maxdepth, self.depth)
+            def visitendnode(self, node):
+                if 'substitution' in node.kind:
+                    self.depth -= 1
+
+        v = depthchecker()
+        v.visit(m.ast)
+        self.assertEquals(v.maxdepth, 1)
+
+    def test_functions(self):
+        cmd = 'function a() { bar; }'
+        shellresults = [(0, 14, helpconstants._function, 'function a() {'),
+                        (18, 19, helpconstants.OPSEMICOLON, ';'),
+                        (20, 21, helpconstants._function, '}'),]
+
+        matchresults = [(15, 18, 'bar synopsis', 'bar')]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+
+        cmd = 'function a() { bar "$(a)"; }'
+        shellresults = [(0, 14, helpconstants._function, 'function a() {'),
+                        (25, 26, helpconstants.OPSEMICOLON, ';'),
+                        (27, 28, helpconstants._function, '}'),]
+
+        matchresults = [(15, 18, 'bar synopsis', 'bar'),
+                        (19, 25, None, '"$(a)"')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+        self.assertEquals(m.expansions, [(22, 23, 'substitution')])
+
+    def test_function_reference(self):
+        cmd = 'function a() { bar; a b; }; a'
+        shellresults = [(0, 14, helpconstants._function, 'function a() {'),
+                        (18, 19, helpconstants.OPSEMICOLON, ';'),
+                        (20, 21, helpconstants._functioncall % 'a', 'a'),
+                        (22, 23, helpconstants._functionarg % 'a', 'b'),
+                        (23, 24, helpconstants.OPSEMICOLON, ';'),
+                        (25, 26, helpconstants._function, '}'),
+                        (26, 27, helpconstants.OPSEMICOLON, ';'),
+                        (28, 29, helpconstants._functioncall % 'a', 'a'),]
+
+        matchresults = [(15, 18, 'bar synopsis', 'bar')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+
+        self.assertEquals(m.functions, set(['a']))
+
+    def test_comment(self):
+        cmd = 'bar # a comment'
+
+        shellresults = [(4, 15, helpconstants.COMMENT, '# a comment')]
+        matchresults = [(0, 3, 'bar synopsis', 'bar')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)
+
+        cmd = '# just a comment'
+
+        shellresults = [(0, 16, helpconstants.COMMENT, '# just a comment')]
+
+        m = matcher.matcher(cmd, s)
+        groups = m.match()
+        self.assertEquals(len(groups), 1)
+        self.assertEquals(groups[0].results, shellresults)
+
+    def test_heredoc_at_eof(self):
+        cmd = 'bar <<EOF'
+
+        shellresults = [(4, 9, helpconstants.REDIRECTION + '\n\n' +
+                               helpconstants.REDIRECTION_KIND['<<'], '<<EOF')]
+
+        matchresults = [(0, 3, 'bar synopsis', 'bar')]
+
+        groups = matcher.matcher(cmd, s).match()
+        self.assertEquals(len(groups), 2)
+        self.assertEquals(groups[0].results, shellresults)
+        self.assertEquals(groups[1].results, matchresults)

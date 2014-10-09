@@ -1,5 +1,9 @@
 import logging, itertools, urllib
+import markupsafe
+
 from flask import render_template, request, redirect
+
+import bashlex.errors
 
 from explainshell import matcher, errors, util, store, config
 from explainshell.web import app, helpers
@@ -18,20 +22,36 @@ def about():
 def explain():
     if 'cmd' not in request.args or not request.args['cmd'].strip():
         return redirect('/')
-    command = request.args['cmd']
+    command = request.args['cmd'].strip()
     command = command[:1000] # trim commands longer than 1000 characters
+    if '\n' in command:
+        return render_template('errors/error.html', title='parsing error!',
+                               message='no newlines please')
+
     s = store.store('explainshell', config.MONGO_URI)
     try:
         matches, helptext = explaincommand(command, s)
-        return render_template('explain.html', matches=matches, helptext=helptext, getargs=command)
+        return render_template('explain.html',
+                               matches=matches,
+                               helptext=helptext,
+                               getargs=command)
+
     except errors.ProgramDoesNotExist, e:
         return render_template('errors/missingmanpage.html', title='missing man page', e=e)
-    except errors.ParsingError, e:
+    except bashlex.errors.ParsingError, e:
         logger.warn('%r parsing error: %s', command, e.message)
         return render_template('errors/parsingerror.html', title='parsing error!', e=e)
+    except NotImplementedError, e:
+        logger.warn('not implemented error trying to explain %r', command)
+        msg = ("the parser doesn't support %r constructs in the command you tried. you may "
+               "<a href='https://github.com/idank/explainshell/issues'>report a "
+               "bug</a> to have this added, if one doesn't already exist.") % e.args[0]
+
+        return render_template('errors/error.html', title='error!', message=msg)
     except:
-        logger.error('uncaught exception trying to explain %r', command)
-        raise
+        logger.error('uncaught exception trying to explain %r', command, exc_info=True)
+        msg = 'something went wrong... this was logged and will be checked'
+        return render_template('errors/error.html', title='error!', message=msg)
 
 @app.route('/explain/<program>', defaults={'section' : None})
 @app.route('/explain/<section>/<program>')
@@ -58,10 +78,14 @@ def explainprogram(program, store):
     mp = mps.pop(0)
     program = mp.namesection
 
+    synopsis = mp.synopsis
+    if synopsis:
+        synopsis = synopsis.decode('utf-8')
+
     mp = {'source' : mp.source[:-3],
           'section' : mp.section,
           'program' : program,
-          'synopsis' : mp.synopsis.decode('utf-8'),
+          'synopsis' : synopsis,
           'options' : [o.text.decode('utf-8') for o in mp.options]}
 
     suggestions = []
@@ -72,9 +96,15 @@ def explainprogram(program, store):
     logger.info('suggestions: %s', suggestions)
     return mp, suggestions
 
+def _makematch(start, end, match, commandclass, helpclass):
+    return {'match' : match, 'start' : start, 'end' : end, 'spaces' : '',
+            'commandclass' : commandclass, 'helpclass' : helpclass}
+
 def explaincommand(command, store):
     matcher_ = matcher.matcher(command, store)
     groups = matcher_.match()
+    expansions = matcher_.expansions
+
     shellgroup = groups[0]
     commandgroups = groups[1:]
     matches = []
@@ -103,9 +133,10 @@ def explaincommand(command, store):
             helpclass = ''
         if helpclass:
             idstartpos.setdefault(helpclass, m.start)
-        d = {'match' : m.match,
-             'start' : m.start, 'end' : m.end,
-             'commandclass' : commandclass, 'helpclass' : helpclass}
+
+        d = _makematch(m.start, m.end, m.match, commandclass, helpclass)
+        formatmatch(d, m, expansions)
+
         l.append(d)
     matches.append(l)
 
@@ -123,9 +154,10 @@ def explaincommand(command, store):
                 helpclass = ''
             if helpclass:
                 idstartpos.setdefault(helpclass, m.start)
-            d = {'match' : m.match,
-                 'start' : m.start, 'end' : m.end,
-                 'commandclass' : commandclass, 'helpclass' : helpclass}
+
+            d = _makematch(m.start, m.end, m.match, commandclass, helpclass)
+            formatmatch(d, m, expansions)
+
             l.append(d)
 
         d = l[0]
@@ -141,6 +173,8 @@ def explaincommand(command, store):
 
     matches = list(itertools.chain.from_iterable(matches))
     helpers.suggestions(matches, command)
+
+    # _checkoverlaps(matcher_.s, matches)
     matches.sort(key=lambda d: d['start'])
 
     it = util.peekable(iter(matches))
@@ -152,4 +186,71 @@ def explaincommand(command, store):
         m['spaces'] = ' ' * spaces
 
     helptext = sorted(texttoid.iteritems(), key=lambda (k, v): idstartpos[v])
+
     return matches, helptext
+
+def formatmatch(d, m, expansions):
+    '''populate the match field in d by escaping m.match and generating
+    links to any command/process substitutions'''
+
+    # save us some work later: do any expansions overlap
+    # the current match?
+    hassubsinmatch = False
+
+    for start, end, kind in expansions:
+        if m.start <= start and end <= m.end:
+            hassubsinmatch = True
+            break
+
+    # if not, just escape the current match
+    if not hassubsinmatch:
+        d['match'] = markupsafe.escape(m.match)
+        return
+
+    # used in es.js
+    d['commandclass'] += ' hasexpansion'
+
+    # go over the expansions, wrapping them with a link; leave everything else
+    # untouched
+    expandedmatch = ''
+    i = 0
+    for start, end, kind in expansions:
+        if start >= m.end:
+            break
+        relativestart = start - m.start
+        relativeend = end - m.start
+
+        if i < relativestart:
+            for j in range(i, relativestart):
+                if m.match[j].isspace():
+                    expandedmatch += markupsafe.Markup('&nbsp;')
+                else:
+                    expandedmatch += markupsafe.escape(m.match[j])
+            i = relativestart + 1
+        if m.start <= start and end <= m.end:
+            s = m.match[relativestart:relativeend]
+
+            if kind == 'substitution':
+                content = markupsafe.Markup('<a href="/explain?cmd={0}" '
+                                            'title="Zoom in to nested command">{0}'
+                                            '</a>').format(s)
+            else:
+                content = s
+
+            expandedmatch += markupsafe.Markup(
+                    '<span class="expansion-{0}">{1}</span>').format(kind, content)
+            i = relativeend
+
+    if i < len(m.match):
+        expandedmatch += markupsafe.escape(m.match[i:])
+
+    assert expandedmatch
+    d['match'] = expandedmatch
+
+def _checkoverlaps(s, matches):
+    explained = [None]*len(s)
+    for d in matches:
+        for i in range(d['start'], d['end']):
+            if explained[i]:
+                raise RuntimeError("explained overlap for group %s at %d with %s" % (d, i, explained[i]))
+            explained[i] = d

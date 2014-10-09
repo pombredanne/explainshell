@@ -155,18 +155,127 @@ REDIRECTION_KIND = {'<' : REDIRECTING_INPUT,
                    '<<' : HERE_DOCUMENTS,
                    '<<<' : HERE_DOCUMENTS}
 
-GROUP = textwrap.dedent('''       { <u>list</u>; }
+ASSIGNMENT = textwrap.dedent('''       A <u>variable</u> may be assigned to by a statement of the form
+
+              <u>name</u>=[<u>value</u>]
+
+       If <u>value</u> is not given, the variable is assigned the null string.  All  <u>values</u>  undergo  tilde  expansion,
+       parameter  and  variable  expansion,  command  substitution, arithmetic expansion, and quote removal (see
+       <b>EXPANSION</b> below).  If the variable has  its  <b>integer</b>  attribute  set,  then  <u>value</u>  is  evaluated  as  an
+       arithmetic  expression even if the $((...)) expansion is not used (see <b>Arithmetic</b> <b>Expansion</b> below).  Word
+       splitting is not performed, with the exception of <b>"$@"</b>  as  explained  below  under  <b>Special</b>  <b>Parameters</b>.
+       Pathname  expansion  is  not performed.  Assignment statements may also appear as arguments to the <b>alias</b>,
+       <b>declare</b>, <b>typeset</b>, <b>export</b>, <b>readonly</b>, and <b>local</b> builtin commands.
+
+       In the context where an assignment statement is assigning a value to a shell variable or array index, the
+       +=  operator  can  be used to append to or add to the variable's previous value.  When += is applied to a
+       variable for which the <u>integer</u> attribute has been set, <u>value</u> is evaluated as an arithmetic expression and
+       added  to the variable's current value, which is also evaluated.  When += is applied to an array variable
+       using compound assignment (see <b>Arrays</b> below), the variable's value is not unset (as it is when using  =),
+       and  new  values  are  appended to the array beginning at one greater than the array's maximum index (for
+       indexed arrays) or added as additional key-value pairs in  an  associative  array.   When  applied  to  a
+       string-valued variable, <u>value</u> is expanded and appended to the variable's value.''')
+
+_group = textwrap.dedent('''       { <u>list</u>; }
               <u>list</u> is simply executed in the current shell environment.  <u>list</u> must be terminated with a  newline
               or  semicolon.   This  is known as a <u>group</u> <u>command</u>.  The return status is the exit status of <u>list</u>.
               Note that unlike the metacharacters <b>(</b> and <b>)</b>, <b>{</b> and <b>}</b> are <u>reserved</u> <u>words</u> and  must  occur  where  a
               reserved  word  is permitted to be recognized.  Since they do not cause a word break, they must be
               separated from <u>list</u> by whitespace or another shell metacharacter.''')
 
-SUBSHELL = textwrap.dedent('''       (<u>list</u>) <u>list</u> is executed in a subshell environment (see <b>COMMAND</b> <b>EXECUTION</b>  <b>ENVIRONMENT</b>  below).   Variable
+_subshell = textwrap.dedent('''       (<u>list</u>) <u>list</u> is executed in a subshell environment (see <b>COMMAND</b> <b>EXECUTION</b>  <b>ENVIRONMENT</b>  below).   Variable
               assignments and builtin commands that affect the shell's environment do not remain in effect after
               the command completes.  The return status is the exit status of <u>list</u>.''')
 
-COMPOUND = {'{' : GROUP, '(' : SUBSHELL}
-
-NEGATE = '''If the reserved word <b>!</b> precedes a pipeline, the exit status of that pipeline is the logical negation of the
+_negate = '''If the reserved word <b>!</b> precedes a pipeline, the exit status of that pipeline is the logical negation of the
 exit status as described above.'''
+
+_if = textwrap.dedent('''       <b>if</b> <u>list</u>; <b>then</b> <u>list;</u> [ <b>elif</b> <u>list</u>; <b>then</b> <u>list</u>; ] ... [ <b>else</b> <u>list</u>; ] <b>fi</b>
+              The  <b>if</b> <u>list</u> is executed.  If its exit status is zero, the <b>then</b> <u>list</u> is executed.  Otherwise, each
+              <b>elif</b> <u>list</u> is executed in turn, and if its exit status is zero,  the  corresponding  <b>then</b>  <u>list</u>  is
+              executed  and  the command completes.  Otherwise, the <b>else</b> <u>list</u> is executed, if present.  The exit
+              status is the exit status of the last command executed, or zero if no condition tested true.''')
+
+_for = textwrap.dedent('''       <b>for</b> <u>name</u> [ [ <b>in</b> [ <u>word</u> <u>...</u> ] ] ; ] <b>do</b> <u>list</u> ; <b>done</b>
+              The  list of words following <b>in</b> is expanded, generating a list of items.  The variable <u>name</u> is set
+              to each element of this list in turn, and <u>list</u> is executed each time.  If the <b>in</b> <u>word</u> is  omitted,
+              the  <b>for</b>  command  executes  <u>list</u>  once  for each positional parameter that is set (see <b>PARAMETERS</b>
+              below).  The return status is the exit status of the last command that executes.  If the expansion
+              of  the  items  following  <b>in</b>  results  in an empty list, no commands are executed, and the return
+              status is 0.''')
+
+_whileuntil = textwrap.dedent('''       <b>while</b> <u>list-1</u>; <b>do</b> <u>list-2</u>; <b>done</b>
+       <b>until</b> <u>list-1</u>; <b>do</b> <u>list-2</u>; <b>done</b>
+              The <b>while</b> command continuously executes the list <u>list-2</u> as long as the last command  in  the  list
+              <u>list-1</u>  returns  an  exit  status  of  zero.  The <b>until</b> command is identical to the <b>while</b> command,
+              except that the test is negated; <u>list-2</u> is executed as long as the last command in <u>list-1</u>  returns
+              a non-zero exit status.  The exit status of the <b>while</b> and <b>until</b> commands is the exit status of the
+              last command executed in <u>list-2</u>, or zero if none was executed.''')
+
+_select = textwrap.dedent('''       <b>select</b> <u>name</u> [ <b>in</b> <u>word</u> ] ; <b>do</b> <u>list</u> ; <b>done</b>
+              The list of words following <b>in</b> is expanded, generating a list of items.  The set of expanded words
+              is printed on the standard error, each preceded by a number.  If  the  <b>in</b>  <u>word</u>  is  omitted,  the
+              positional  parameters are printed (see <b>PARAMETERS</b> below).  The <b>PS3</b> prompt is then displayed and a
+              line read from the standard input.  If the line consists of a number corresponding to one  of  the
+              displayed  words, then the value of <u>name</u> is set to that word.  If the line is empty, the words and
+              prompt are displayed again.  If EOF is read, the command completes.  Any other value  read  causes
+              <u>name</u> to be set to null.  The line read is saved in the variable <b>REPLY</b>.  The <u>list</u> is executed after
+              each selection until a <b>break</b> command is executed.  The exit status of <b>select</b> is the exit status of
+              the last command executed in <u>list</u>, or zero if no commands were executed.''')
+
+RESERVEDWORDS = {
+    '!' : _negate,
+    '{' : _group,
+    '}' : _group,
+    '(' : _subshell,
+    ')' : _subshell,
+    ';' : OPSEMICOLON,
+}
+
+def _addwords(key, text, *words):
+    for word in words:
+        COMPOUNDRESERVEDWORDS.setdefault(key, {})[word] = text
+
+COMPOUNDRESERVEDWORDS = {}
+_addwords('if', _if, 'if', 'then', 'elif', 'else', 'fi', ';')
+_addwords('for', _for, 'for', 'in', 'do', 'done', ';')
+_addwords('while', _whileuntil, 'while', 'do', 'done', ';')
+_addwords('until', _whileuntil, 'until', 'do', 'done')
+_addwords('select', _select, 'select', 'in', 'do', 'done')
+
+_function = textwrap.dedent('''       A shell function is an object that is called like a simple command and executes a compound command with a
+       new set of positional parameters.  Shell functions are declared as follows:
+
+       <u>name</u> () <u>compound-command</u> [<u>redirection</u>]
+       <b>function</b> <u>name</u> [()] <u>compound-command</u> [<u>redirection</u>]
+              This  defines  a  function  named  <u>name</u>.  The reserved word <b>function</b> is optional.  If the <b>function</b>
+              reserved word is supplied, the parentheses are optional.  The <u>body</u> of the function is the compound
+              command  <u>compound-command</u>  (see  <b>Compound</b>  <b>Commands</b>  above).   That  command  is usually a <u>list</u> of
+              commands between {  and  },  but  may  be  any  command  listed  under  <b>Compound</b>  <b>Commands</b>  above.
+              <u>compound-command</u>  is  executed  whenever  <u>name</u>  is specified as the name of a simple command.  Any
+              redirections (see <b>REDIRECTION</b> below) specified when a function is defined are performed  when  the
+              function  is  executed.   The  exit  status of a function definition is zero unless a syntax error
+              occurs or a readonly function with the same name already exists.  When executed, the  exit  status
+              of a function is the exit status of the last command executed in the body.  (See <b>FUNCTIONS</b> below.)''')
+
+_functioncall = 'call shell function %r'
+_functionarg = 'argument for shell function %r'
+
+COMMENT = textwrap.dedent('''<b>COMMENTS</b>
+      In a non-interactive shell, or an interactive shell in which the <b>interactive_comments</b> option to the <b>shopt</b>
+      builtin is enabled (see <b>SHELL</b> <b>BUILTIN</b> <b>COMMANDS</b> below), a word beginning with <b>#</b> causes that word  and  all
+      remaining  characters  on that line to be ignored.  An interactive shell without the <b>interactive_comments</b>
+      option enabled does not allow comments.  The <b>interactive_comments</b> option is on by default in  interactive
+      shells.''')
+
+parameters = {
+        '*' : 'star',
+        '@' : 'at',
+        '#' : 'pound',
+        '?' : 'question',
+        '-' : 'hyphen',
+        '$' : 'dollar',
+        '!' : 'exclamation',
+        '0' : 'zero',
+        '_' : 'underscore',
+}

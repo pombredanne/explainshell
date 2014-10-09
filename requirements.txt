@@ -1,4 +1,6 @@
+markupsafe
 Flask
 nltk
 nose
 pymongo
+bashlex
